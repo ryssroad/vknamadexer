@@ -1,17 +1,18 @@
 use axum::{routing::get, Router};
+use http::{HeaderValue, Method};
+use tower_http::cors::{Any, CorsLayer};
 
 #[cfg(feature = "prometheus")]
 use axum_prometheus::{PrometheusMetricLayerBuilder, AXUM_HTTP_REQUESTS_DURATION_SECONDS};
 use futures_util::{Future, TryFutureExt};
 #[cfg(feature = "prometheus")]
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
-use std::{collections::HashMap, net::SocketAddr};
+use std::net::SocketAddr;
 use tracing::{info, instrument};
 
 use crate::config::ServerConfig;
 use crate::database::Database;
 use crate::error::Error;
-use crate::utils::load_checksums;
 
 pub mod blocks;
 pub mod tx;
@@ -25,6 +26,7 @@ pub(crate) use utils::{from_hex, serialize_hex};
 
 use self::endpoints::{
     account::get_account_updates,
+    address::get_txs_by_address,
     block::{get_block_by_hash, get_block_by_height, get_last_block},
     transaction::{get_shielded_tx, get_tx_by_hash, get_vote_proposal},
     validator::get_validator_uptime,
@@ -37,11 +39,14 @@ pub const HTTP_DURATION_SECONDS_BUCKETS: &[f64; 11] = &[
 #[derive(Clone)]
 pub struct ServerState {
     db: Database,
-    checksums_map: HashMap<String, String>,
 }
 
 fn server_routes(state: ServerState) -> Router<()> {
+    let cors = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST])
+        .allow_origin(Any);
     Router::new()
+        .route("/address/:address", get(get_txs_by_address))
         .route("/block/height/:block_height", get(get_block_by_height))
         .route("/block/hash/:block_hash", get(get_block_by_hash))
         .route("/block/last", get(get_last_block))
@@ -53,6 +58,7 @@ fn server_routes(state: ServerState) -> Router<()> {
             "/validator/:validator_address/uptime",
             get(get_validator_uptime),
         )
+        .layer(cors)
         .with_state(state)
 }
 
@@ -70,8 +76,6 @@ pub fn create_server(
     config: &ServerConfig,
 ) -> Result<(SocketAddr, impl Future<Output = Result<(), Error>>), Error> {
     info!("Starting JSON server");
-
-    let checksums_map = load_checksums()?;
 
     // JSON API server
     // we move the handler creation here so we propagate errors gracefully
@@ -91,7 +95,18 @@ pub fn create_server(
         .with_metrics_from_fn(|| prometheus_handle)
         .build_pair();
 
-    let routes = server_routes(ServerState { db, checksums_map });
+    let mut routes = server_routes(ServerState { db });
+    if !config.cors_allow_origins.is_empty() {
+        let origins: Vec<HeaderValue> = config
+            .cors_allow_origins
+            .iter()
+            .map(|s| s.parse::<HeaderValue>().unwrap())
+            .collect();
+        let cors = CorsLayer::new()
+            .allow_methods([Method::GET])
+            .allow_origin(origins);
+        routes = routes.layer(cors)
+    };
 
     #[cfg(feature = "prometheus")]
     let routes = routes
