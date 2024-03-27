@@ -1,4 +1,3 @@
-use namada_sdk::types::token::Amount;
 use serde::{Deserialize, Serialize};
 
 /// The relevant information regarding accounts.
@@ -20,12 +19,4 @@ pub struct AccountUpdates {
     /// Similar to code hash, the last element
     /// is contains the set of public keys this account is associated with.
     pub public_keys: Vec<Vec<String>>,
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct AccountSummary {
-    pub is_validator: bool,
-    pub is_steward: bool,
-    pub native_balance: Amount,
-    pub known_address: bool,
 }

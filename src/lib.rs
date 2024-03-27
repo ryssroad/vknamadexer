@@ -7,6 +7,7 @@ pub mod server;
 pub mod tables;
 mod telemetry;
 pub mod utils;
+mod views;
 
 pub use crate::config::{
     IndexerConfig, JaegerConfig, LogFormat, PrometheusConfig, ServerConfig, Settings,
@@ -23,5 +24,7 @@ const DB_SAVE_BLOCK_DURATION: &str = "db_save_block_duration";
 const DB_SAVE_TXS_DURATION: &str = "db_save_transactions_duration";
 const DB_SAVE_EVDS_DURATION: &str = "db_save_evidences_duration";
 const DB_SAVE_COMMIT_SIG_DURATION: &str = "db_save_commit_sig_duration";
+const INDEXER_LAST_SAVE_BLOCK_HEIGHT: &str = "indexer_last_save_block_height";
+const INDEXER_LAST_GET_BLOCK_HEIGHT: &str = "indexer_last_get_block_height";
 
 pub const MASP_ADDR: &str = "tnam1pcqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzmefah";

@@ -1,7 +1,5 @@
 pub mod account;
+pub mod address;
 pub mod block;
 pub mod transaction;
 pub mod validator;
-pub mod status;
-pub mod proposal;
-pub mod signature;

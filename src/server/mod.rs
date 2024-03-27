@@ -1,47 +1,35 @@
 use axum::{routing::get, Router};
-use axum::http::HeaderValue;
-use std::default;
-use std::str::FromStr;
+use http::{HeaderValue, Method};
+use tower_http::cors::{Any, CorsLayer};
+
 #[cfg(feature = "prometheus")]
 use axum_prometheus::{PrometheusMetricLayerBuilder, AXUM_HTTP_REQUESTS_DURATION_SECONDS};
 use futures_util::{Future, TryFutureExt};
 #[cfg(feature = "prometheus")]
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
-use std::{collections::HashMap, net::SocketAddr};
+use std::net::SocketAddr;
 use tracing::{info, instrument};
-use tendermint_rpc::{HttpClient, Url};
-use serde::{Serialize, Deserialize};
 
 use crate::config::ServerConfig;
 use crate::database::Database;
 use crate::error::Error;
-use crate::utils::load_checksums;
-use tower_http::cors::{Any, CorsLayer};
 
-pub mod status;
-pub use status::{ChainStatus, StakingInfo};
-pub mod validators;
-pub use validators::ValidatorInfo;
 pub mod blocks;
-pub mod proposals;
 pub mod tx;
 pub use blocks::BlockInfo;
 pub use tx::TxInfo;
 pub mod account;
-pub mod signatures;
 mod endpoints;
 pub mod shielded;
 mod utils;
 pub(crate) use utils::{from_hex, serialize_hex};
 
 use self::endpoints::{
-    account::{get_account_updates, get_account_summary},
+    account::get_account_updates,
+    address::get_txs_by_address,
     block::{get_block_by_hash, get_block_by_height, get_last_block},
     transaction::{get_shielded_tx, get_tx_by_hash, get_vote_proposal},
-    validator::{get_validator_uptime, get_validator_info, get_validator_set},
-    status::{get_status, get_chain_params, get_last_epoch},
-    proposal::{get_all_proposals, get_proposal, get_proposal_result},
-    signature::get_signatures_by_block_hash,
+    validator::get_validator_uptime,
 };
 
 pub const HTTP_DURATION_SECONDS_BUCKETS: &[f64; 11] = &[
@@ -51,33 +39,26 @@ pub const HTTP_DURATION_SECONDS_BUCKETS: &[f64; 11] = &[
 #[derive(Clone)]
 pub struct ServerState {
     db: Database,
-    checksums_map: HashMap<String, String>,
-    http_client: HttpClient,
 }
 
 fn server_routes(state: ServerState) -> Router<()> {
+    let cors = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST])
+        .allow_origin(Any);
     Router::new()
+        .route("/address/:address", get(get_txs_by_address))
         .route("/block/height/:block_height", get(get_block_by_height))
         .route("/block/hash/:block_hash", get(get_block_by_hash))
         .route("/block/last", get(get_last_block))
-        .route("/block/signatures/:block_hash", get(get_signatures_by_block_hash))
         .route("/tx/:tx_hash", get(get_tx_by_hash))
         .route("/tx/vote_proposal/:proposal_id", get(get_vote_proposal))
         .route("/tx/shielded", get(get_shielded_tx))
         .route("/account/updates/:account_id", get(get_account_updates))
-        .route("/account/:address/info", get(get_account_summary))
         .route(
             "/validator/:validator_address/uptime",
             get(get_validator_uptime),
         )
-        .route("/validator/:validator_address/info", get(get_validator_info))
-        .route("/validator/set", get(get_validator_set))
-        .route("/chain/status", get(get_status))
-        .route("/chain/params", get(get_chain_params))
-        .route("/chain/epoch/last", get(get_last_epoch))
-        .route("/proposals/list", get(get_all_proposals))
-        .route("/proposals/:id/info", get(get_proposal))
-        .route("/proposals/:id/result", get(get_proposal_result))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -95,8 +76,6 @@ pub fn create_server(
     config: &ServerConfig,
 ) -> Result<(SocketAddr, impl Future<Output = Result<(), Error>>), Error> {
     info!("Starting JSON server");
-
-    let checksums_map = load_checksums()?;
 
     // JSON API server
     // we move the handler creation here so we propagate errors gracefully
@@ -116,10 +95,18 @@ pub fn create_server(
         .with_metrics_from_fn(|| prometheus_handle)
         .build_pair();
 
-    let url = Url::from_str(&config.tendermint_addr)?;
-    let http_client = HttpClient::new(url)?;
-
-    let routes = server_routes(ServerState { db, checksums_map, http_client });
+    let mut routes = server_routes(ServerState { db });
+    if !config.cors_allow_origins.is_empty() {
+        let origins: Vec<HeaderValue> = config
+            .cors_allow_origins
+            .iter()
+            .map(|s| s.parse::<HeaderValue>().unwrap())
+            .collect();
+        let cors = CorsLayer::new()
+            .allow_methods([Method::GET])
+            .allow_origin(origins);
+        routes = routes.layer(cors)
+    };
 
     #[cfg(feature = "prometheus")]
     let routes = routes
@@ -128,15 +115,9 @@ pub fn create_server(
 
     info!("server URL : {}:{}", &config.serve_at, &config.port);
 
-    let cors = CorsLayer::new()
-        .allow_origin("*".parse::<HeaderValue>().unwrap())
-        .allow_methods(Any)
-        .allow_headers(Any);
-    let routes_with_cors = routes.layer(cors);
-
     let server = axum::Server::try_bind(&config.address()?)
         .map_err(|e| Error::Generic(Box::new(e)))?
-        .serve(routes_with_cors.into_make_service());
+        .serve(routes.into_make_service());
 
     let local_addr = server.local_addr();
 
@@ -159,27 +140,4 @@ pub async fn start_server(db: Database, config: &ServerConfig) -> Result<(), Err
     let (_, server) = create_server(db, config)?;
 
     server.await
-}
-
-/// Pagination info for endpoint queries
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct Pagination {
-    pub page: u64, // Page number
-    pub per_page: u64, // Entries per page
-}
-
-impl Default for Pagination {
-    fn default() -> Self {
-        Pagination {
-            page: 1,
-            per_page: 20,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct PaginationResponse {
-    pub page: u64, // Page number
-    pub per_page: u64, // Entries per page
-    pub total: u64,
 }
